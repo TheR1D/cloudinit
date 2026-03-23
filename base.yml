@@ -1,0 +1,123 @@
+#cloud-config
+
+merge_how:
+ - name: list
+   settings: [append]
+ - name: dict
+   settings: [no_replace, recurse_list]
+
+package_update: true
+package_upgrade: true
+
+# Swap configuration (2GB)
+swap:
+  filename: /swapfile
+  size: 2147483648
+  maxsize: 2147483648
+
+# Hostname and timezone
+hostname: ${hostname}
+timezone: ${timezone}
+
+# SSH hardening
+ssh_pwauth: false
+disable_root: true
+
+# User configuration
+users:
+  - name: ${username}
+    plain_text_passwd: ${password}
+    ssh_authorized_keys: ${ssh_public_key}
+    lock_passwd: false # Allow login from console.
+    sudo: ALL=(ALL) NOPASSWD:ALL # TODO: remove this after alpha
+    groups: [sudo]
+    shell: /usr/bin/zsh
+
+# Package installation, most of these are preinstalled on Ubuntu.
+packages:
+  - openssh-server
+  - qemu-guest-agent
+  - ufw
+  - git
+  - zsh
+  - tmux
+  - htop
+  - curl
+  - wget
+  - neovim
+  - python3
+  - python3-pip
+  - pipx
+  - build-essential
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/01-custom-port.conf
+    content: |
+      Port ${ssh_port}
+    permissions: '0644'
+
+  # Git credential store for GitHub private repos
+  - path: /home/${username}/.git-credentials
+    owner: "${username}:${username}"
+    permissions: '0600'
+    defer: true
+    content: |
+      ${github_credentials}
+
+  - path: /etc/environment
+    append: true
+    permissions: '0644'
+    content: |
+      OP_SERVICE_ACCOUNT_TOKEN="${op_service_account_token}"
+      OP_ENV_ID="${op_env_id}"
+
+  - path: /etc/zsh/zshrc
+    permissions: '0644'
+    content: |
+      # History settings
+      HISTFILE=~/.zsh_history
+      HISTSIZE=1000
+      SAVEHIST=10000
+      setopt APPEND_HISTORY
+
+      # Enable VIM mode
+      bindkey -v
+
+      # Unbind CTRL+L (later will be used for sgpt completion)
+      bindkey -r '^L'
+
+      # Fix not working backspace in VIM insert mode
+      bindkey -M viins '^?' backward-delete-char
+      bindkey -M viins '^H' backward-delete-char
+
+      # Keep default CTRL+R working
+      bindkey -M vicmd '^R' history-incremental-search-backward
+      bindkey -M viins '^R' history-incremental-search-backward
+
+      # CTRL+T to attach or create tmux session
+      bindkey -s '^T' 'tmux attach || tmux new\n'
+
+      # Custom prompt
+      PROMPT="$(hostname): "
+
+      # Enable completions
+      autoload -Uz compinit
+      compinit
+
+# Run commands after initial setup
+runcmd:
+  # Install 1Password CLI Beta (with ENVs)
+  - curl -sS https://downloads.1password.com/linux/keys/1password.asc | gpg --dearmor --output /usr/share/keyrings/1password-archive-keyring.gpg
+  - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/1password-archive-keyring.gpg] https://downloads.1password.com/linux/debian/$(dpkg --print-architecture) beta main" | tee /etc/apt/sources.list.d/1password.list
+  - mkdir -p /etc/debsig/policies/AC2D62742012EA22/
+  - curl -sS https://downloads.1password.com/linux/debian/debsig/1password.pol | tee /etc/debsig/policies/AC2D62742012EA22/1password.pol
+  - mkdir -p /usr/share/debsig/keyrings/AC2D62742012EA22
+  - curl -sS https://downloads.1password.com/linux/keys/1password.asc | gpg --dearmor --output /usr/share/debsig/keyrings/AC2D62742012EA22/debsig.gpg
+  - apt update && apt install -y 1password-cli
+
+  - systemctl enable --now qemu-guest-agent
+  - systemctl restart ssh
+  - ufw allow ${ssh_port}/tcp comment 'SSH'
+  - ufw --force enable
+  # After installation complete drop caches to free up memory
+  - sysctl -w vm.drop_caches=3
